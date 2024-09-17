@@ -4,14 +4,41 @@
 #include <ws2tcpip.h> //< Header pour le modèle TCP/IP, permettant notamment la gestion d'adresses IP
 #include <vector>
 #include <conio.h>
+#include <chrono>
+#include <time.h>
+
+#define CHANGE_NICKNAME_COMMAND "/nick "
 
 // Sous Windows il faut linker ws2_32.lib (Proriétés du projpet => Éditeur de lien => Entrée => Dépendances supplémentaires)
 // Ce projet est également configuré en C++17 (ce n'est pas nécessaire à winsock)
 
+std::string date_to_string(std::time_t time)
+{
+	char buf[100] = { 0 };
+	tm t;
+	localtime_s(&t, &time);
+	std::strftime(buf, sizeof(buf), "%Y-%m-%d - %H:%M:%S", &t);
+	return buf;
+}
+
+struct MessageData
+{
+	std::time_t date = 0;
+	std::string sender = "";
+	std::string message = "";
+};
+
 struct ClientData
 {
-	SOCKET socket;
-	std::string nickName;
+	SOCKET socket = {};
+	std::string nickName = "";
+};
+
+struct ServerData
+{
+	SOCKET socket = {};
+	std::vector<ClientData> clients;
+	std::vector<MessageData> chatHistory;
 };
 
 int server();
@@ -24,7 +51,7 @@ int main()
 	WSADATA data;
 	WSAStartup(MAKEWORD(2, 2), &data); //< MAKEWORD compose un entier 16bits à partir de deux entiers 8bits utilisés par WSAStartup pour connaître la version à initialiser
 
-	std::cout << "server/client? " << std::flush;
+	std::cout << "(S)erver or (C)lient ?" << std::flush;
 	std::string choice;
 	std::getline(std::cin, choice);
 
@@ -42,10 +69,12 @@ int main()
 
 int server()
 {
-	SOCKET serverSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (serverSock == INVALID_SOCKET)
+	ServerData serverData;
+
+	serverData.socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (serverData.socket == INVALID_SOCKET)
 	{
-		std::cerr << "failed to open socket (" << WSAGetLastError() << ")\n";
+		std::cerr << "Failed to open server socket. Error code : " << WSAGetLastError() << std::endl;
 		return EXIT_FAILURE;
 	}
 
@@ -55,19 +84,18 @@ int server()
 	bindAddr.sin_family = AF_INET;
 
 	// On associe notre socket à une adresse / port d'écoute
-	if (bind(serverSock, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR)
+	if (bind(serverData.socket, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR)
 	{
-		std::cerr << "failed to bind socket (" << WSAGetLastError() << ")\n";
+		std::cerr << "Failed to bind server socket. Error code : " << WSAGetLastError() << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	if (listen(serverSock, 10) == SOCKET_ERROR)
+	if (listen(serverData.socket, 10) == SOCKET_ERROR)
 	{
-		std::cerr << "failed to put socket into listen mode (" << WSAGetLastError() << ")\n";
+		std::cerr << "Failed to put server socket in listen mode. Error code : " << WSAGetLastError() << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	std::vector<ClientData> clients;
 	// Boucle infinie pour que le serveur tourne indéfiniment
 	while (true)
 	{
@@ -81,12 +109,12 @@ int server()
 		// La méthode emplace_back construit un objet à l'intérieur du vector et nous renvoie une référence dessus
 		// alternativement nous pourrions également construire une variable de type WSAPOLLFD et l'ajouter au vector avec push_back 
 		WSAPOLLFD& serverFd = pollFds.emplace_back();
-		serverFd.fd = serverSock;
+		serverFd.fd = serverData.socket;
 		serverFd.events = POLLIN;
 		serverFd.revents = 0;
 
 		// On rajoute un descripteur pour chacun de nos clients actuels
-		for (ClientData client : clients)
+		for (ClientData client : serverData.clients)
 		{
 			WSAPOLLFD& clientFd = pollFds.emplace_back();
 			clientFd.fd = client.socket;
@@ -111,37 +139,44 @@ int server()
 				// Ce descripteur a été déclenché, et deux cas de figures sont possibles.
 				// Soit il s'agit du descripteur de la socket serveur (celle permettant la connexion de clients), signifiant qu'un nouveau client est en attente
 				// Soit une socket client est active, signifiant que nous avons reçu des données (ou potentiellement que le client s'est déconnecté)
-				if (pollFd.fd == serverSock)
+				if (pollFd.fd == serverData.socket)
 				{
 					// La socket
 					sockaddr_in clientAddr;
 					int clientAddrSize = sizeof(clientAddr);
 
-					SOCKET c = accept(serverSock, reinterpret_cast<sockaddr*>(&clientAddr), &clientAddrSize);
-					if (c == INVALID_SOCKET)
+					ClientData client;
+
+					client.socket = accept(serverData.socket, reinterpret_cast<sockaddr*>(&clientAddr), &clientAddrSize);
+					if (client.socket == INVALID_SOCKET)
 					{
-						std::cerr << "failed to put accept new client (" << WSAGetLastError() << ")\n";
+						std::cerr << "Failed to accept new client. Error code : " << WSAGetLastError() << std::endl;
 						return EXIT_FAILURE;
 					}
-
-					ClientData client;
-					client.socket = c;
-					client.nickName = "";
 
 					// Représente une adresse IP (celle du client venant de se connecter) sous forme textuelle
 					char strAddr[INET_ADDRSTRLEN];
 					inet_ntop(clientAddr.sin_family, &clientAddr.sin_addr, strAddr, INET_ADDRSTRLEN);
 
-					std::cout << "new client connected from " << strAddr << ":" << ntohs(clientAddr.sin_port) << std::endl;
+					std::cout << "New client connected from " << strAddr << " : " << ntohs(clientAddr.sin_port) << std::endl;
 
-					std::string message = "please input an username : \n";
+					std::string message = "Please input an username :";
 					if (send(client.socket, message.data(), message.size(), 0) == SOCKET_ERROR)
-						std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
+						std::cerr << "Failed to send message to client. Error code : " << WSAGetLastError() << std::endl;
 
-					clients.push_back(client);
+					serverData.clients.push_back(client);
 				}
 				else
 				{
+					auto it = std::find_if(
+						serverData.clients.begin(),
+						serverData.clients.end(),
+						[&pollFd](const ClientData& data)
+						{
+							return data.socket == pollFd.fd;
+						}
+					);
+
 					// Client
 					char buffer[1024];
 					int len = recv(pollFd.fd, buffer, sizeof(buffer), 0);
@@ -150,23 +185,21 @@ int server()
 						// Disconnect
 						closesocket(pollFd.fd);
 
-						auto it = std::find_if(clients.begin(), clients.end(), [&pollFd](ClientData data){return data.socket == pollFd.fd;});
-
 						std::string username = it->nickName;
 
 						if (len == SOCKET_ERROR)
-							std::cerr << "recv failed (" << WSAGetLastError() << ")\n";
+							std::cerr << "Failed to receive. Error code : " << WSAGetLastError() << std::endl;
 						else
-							std::cout << username << " client disconnected" << std::endl;
+							std::cout << "Client " << username << " disconnected." << std::endl;
 
-						clients.erase(it);
+						serverData.clients.erase(it);
 
 						std::string messageDisconnect = username + " disconnected.";
-						for (ClientData client : clients)
+						for (const ClientData& client : serverData.clients)
 						{
 							if (send(client.socket, messageDisconnect.data(), messageDisconnect.size(), 0) == SOCKET_ERROR)
 							{
-								std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
+								std::cerr << "Failed to send message to client. Error code : " << WSAGetLastError() << std::endl;
 								// Pas de return ici pour éviter de casser le serveur sur l'envoi à un seul client,
 								// contentons-nous pour l'instant de logger l'erreur
 							}
@@ -175,46 +208,65 @@ int server()
 						continue;
 					}
 
-					std::cout << "received " << std::string_view(buffer, len) << std::endl;
+					MessageData messageData;
+					messageData.date = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+					messageData.sender = it->nickName;
+
+					if (it->nickName == "")
+					{
+						it->nickName = std::string(buffer, len);
+
+						std::string previousMessages;
+
+						for (auto& message : serverData.chatHistory)
+							previousMessages += (date_to_string(message.date) + " - " + (message.sender.empty() ? "" : message.sender + " : ") + message.message + "\n");
+
+						if (send(it->socket, previousMessages.data(), previousMessages.size(), 0) == SOCKET_ERROR)
+							std::cerr << "Failed to send message to client. Error code : " << WSAGetLastError() << std::endl;
+
+						messageData.message = it->nickName + " just joined the chat.";
+					}
+
+					if (messageData.message.empty())
+						messageData.message = std::string(buffer, len);
+
+					if (messageData.message.find(CHANGE_NICKNAME_COMMAND) == 0)
+					{
+						messageData.message.erase(0, std::string(CHANGE_NICKNAME_COMMAND).size());
+						
+						for (MessageData& m : serverData.chatHistory)
+						{
+							if(m.sender == it->nickName)
+								m.sender = messageData.message;
+						}
+
+						std::string deadName = it->nickName;
+						it->nickName = messageData.message;
+						messageData.sender = it->nickName;
+						messageData.message = deadName + " renamed to " + it->nickName + ".";
+					}
 
 					// On renvoie le message à tous les autres clients connectés
-					for (ClientData client : clients)
+					for (ClientData& client : serverData.clients)
 					{
-						bool newClient = false;
-						// On évite d'envoyer le message à la personne qui vient de l'envoyer
-						if (client.socket == pollFd.fd)
-						{
-							if (client.nickName == "")
-							{
-								client.nickName == std::string(buffer, len);
-								newClient = true;
-							}
+						std::string stringToSend;
 
-							continue;
-						}
-
-						if (newClient)
+						stringToSend = messageData.sender.empty() ? messageData.message : messageData.sender + " : " + messageData.message;
+						if (send(client.socket, stringToSend.data(), stringToSend.size(), 0) == SOCKET_ERROR)
 						{
-							std::string newClientMessage = client.nickName + " just joined the chat.\n";
-							if (send(client.socket, newClientMessage.data(), newClientMessage.size(), 0) == SOCKET_ERROR)
-								std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
-						}
-						else
-						{
-							if (send(client.socket, buffer, len, 0) == SOCKET_ERROR)
-							{
-								std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
-								// Pas de return ici pour éviter de casser le serveur sur l'envoi à un seul client,
-								// contentons-nous pour l'instant de logger l'erreur
-							}
+							std::cerr << "Failed to send message to client. Error code : " << WSAGetLastError() << std::endl;
+							// Pas de return ici pour éviter de casser le serveur sur l'envoi à un seul client,
+							// contentons-nous pour l'instant de logger l'erreur
 						}
 					}
+
+					serverData.chatHistory.push_back(messageData);
 				}
 			}
 		}
 	}
 
-	closesocket(serverSock);
+	closesocket(serverData.socket);
 
 	return EXIT_SUCCESS;
 }
@@ -224,7 +276,7 @@ int client()
 	SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	if (sock == INVALID_SOCKET)
 	{
-		std::cerr << "failed to open socket (" << WSAGetLastError() << ")\n";
+		std::cerr << "Failed to open client socket : " << WSAGetLastError() << std::endl;
 		return EXIT_FAILURE;
 	}
 
@@ -244,7 +296,7 @@ int client()
 		// Conversion d'une adresse IP textuelle vers une adresse IP binaire
 		if (inet_pton(AF_INET, ip.data(), &bindAddr.sin_addr.s_addr) != 1)
 		{
-			std::cerr << "invalid ip" << std::endl;
+			std::cerr << "Invalid ip." << std::endl;
 			continue;
 		}
 
@@ -252,7 +304,7 @@ int client()
 		// en mode bloquant, cette fonction ne retourne qu'une fois la connexion établie ou échouée.
 		if (connect(sock, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR)
 		{
-			std::cerr << "failed to connect" << std::endl;
+			std::cerr << "Failed to connect to ip " << ip << ". Error code : " << WSAGetLastError() << std::endl;
 			continue;
 		}
 
@@ -261,7 +313,6 @@ int client()
 	}
 
 	std::string message;
-	std::cout << "> " << std::flush;
 
 	while (true)
 	{
@@ -290,12 +341,13 @@ int client()
 				{
 					if (send(sock, message.data(), message.size(), 0) == SOCKET_ERROR)
 					{
-						std::cout << "failed to send message to server: " << WSAGetLastError() << std::endl;
+						std::cout << "Failed to send message to server : " << WSAGetLastError() << std::endl;
 						return EXIT_FAILURE;
 					}
 
 					// On affiche un retour à la ligne et le marqueur de saisie
-					std::cout << "\n> " << std::flush;
+					for (size_t i = 0; i < message.size(); i++)
+						std::cout << ' ' << '\b';
 
 					// On vide le message pour revenir à la suite
 					message.clear();
@@ -317,15 +369,15 @@ int client()
 		// On met un timeout de 10ms pour éviter de pomper inutilement 100% du CPU ;o
 		if (WSAPoll(&pollFd, 1, 10) > 0)
 		{
-			char buffer[1024];
+			char buffer[2048];
 			int len = recv(sock, buffer, sizeof(buffer), 0);
 			if (len == 0 || len == SOCKET_ERROR)
 			{
 				// recv renvoie 0 en cas de déconnexion propre, ou SOCKET_ERROR en cas d'erreur (typiquement time out)
 				if (len == 0)
-					std::cout << "disconnected from server" << std::endl;
+					std::cout << "Disconnected from server." << std::endl;
 				else
-					std::cout << "disconnected with error: " << WSAGetLastError() << std::endl;
+					std::cout << "Disconnected with error: " << WSAGetLastError() << std::endl;
 
 				return EXIT_FAILURE;
 			}
@@ -335,7 +387,7 @@ int client()
 			// Pour garder la saisie continue, on fait un retour à la ligne avant d'afficher le message
 			// puis à nouveau le marqueur de saisie et le message en cours
 			// ce n'est pas idéal mais c'est plus simple qu'effacer la ligne
-			std::cout << '\n' << receivedMessage << "\n> " << message << std::flush;
+			std::cout << receivedMessage << "\n" << message << std::flush;
 		}
 	}
 
