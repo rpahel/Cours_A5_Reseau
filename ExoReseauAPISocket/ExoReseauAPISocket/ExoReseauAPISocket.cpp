@@ -2,17 +2,20 @@
 #include <string> //< std::string / std::string_view
 #include <winsock2.h> //< Header principal de Winsock
 #include <ws2tcpip.h> //< Header pour le modèle TCP/IP, permettant notamment la gestion d'adresses IP
+#include <vector>
+#include <conio.h>
 
 // Sous Windows il faut linker ws2_32.lib (Proriétés du projpet => Éditeur de lien => Entrée => Dépendances supplémentaires)
 // Ce projet est également configuré en C++17 (ce n'est pas nécessaire à winsock)
 
-/*
-//////
-Petit projet d'exemple de mini serveur HTTP (capable d'accepter la connexion d'un navigateur via http://localhost:1337) et de renvoyer une page
-Ce code est loin d'être parfait (ne gère qu'un seul client avant de se fermer, pas de libération de ressource en cas d'erreur,
-ne fonctionne qu'en local à cause d'un seul appel à read, ne décode pas les données envoyées par le navigateur, etc.)
-//////
-*/
+struct ClientData
+{
+	SOCKET socket;
+	std::string nickName;
+};
+
+int server();
+int client();
 
 int main()
 {
@@ -21,98 +24,323 @@ int main()
 	WSADATA data;
 	WSAStartup(MAKEWORD(2, 2), &data); //< MAKEWORD compose un entier 16bits à partir de deux entiers 8bits utilisés par WSAStartup pour connaître la version à initialiser
 
-	// La création d'une socket se fait à l'aide de la fonction `socket`, celle-ci prend la famille de sockets, le type de socket,
-	// ainsi que le protocole désiré (0 est possible en troisième paramètre pour laisser le choix du protocole à la fonction).
-	// Pour IPv4, on utilisera AF_INET et pour IPv6 AF_INET6
-	// Ici on initialise donc une socket TCP
-	// Sous POSIX la fonction renvoie un entier valant -1 en cas d'erreur
-	SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock == INVALID_SOCKET)
+	std::cout << "server/client? " << std::flush;
+	std::string choice;
+	std::getline(std::cin, choice);
+
+	int r;
+	if (choice == "s")
+		r = server();
+	else
+		r = client();
+
+	// Fermeture de Winsock
+	WSACleanup();
+
+	return r;
+}
+
+int server()
+{
+	SOCKET serverSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (serverSock == INVALID_SOCKET)
 	{
-		// En cas d'erreur avec Winsock, la fonction WSAGetLastError() permet de récupérer le dernier code d'erreur
-		// Sous POSIX l'équivalent est errno
 		std::cerr << "failed to open socket (" << WSAGetLastError() << ")\n";
 		return EXIT_FAILURE;
 	}
 
-	// On compose une adresse IP (celle-ci sert à décrire ce qui est autorisé à se connecter ainsi que le port d'écoute)
-	// Cette adresse IP est associée à un port ainsi qu'à une famille (IPv4/IPv6)
 	sockaddr_in bindAddr;
 	bindAddr.sin_addr.s_addr = INADDR_ANY;
 	bindAddr.sin_port = htons(1337); //< Conversion du nombre en big endian (endianness réseau)
 	bindAddr.sin_family = AF_INET;
 
 	// On associe notre socket à une adresse / port d'écoute
-	if (bind(sock, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR)
+	if (bind(serverSock, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR)
 	{
 		std::cerr << "failed to bind socket (" << WSAGetLastError() << ")\n";
 		return EXIT_FAILURE;
 	}
 
-	// On passe la socket en mode écoute, passant notre socket TCP en mode serveur, capable d'accepter des connexions externes
-	// Le second argument de la fonction est le nombre de clients maximum pouvant être en attente
-	if (listen(sock, 10) == SOCKET_ERROR)
+	if (listen(serverSock, 10) == SOCKET_ERROR)
 	{
 		std::cerr << "failed to put socket into listen mode (" << WSAGetLastError() << ")\n";
 		return EXIT_FAILURE;
 	}
 
-	sockaddr_in clientAddr;
-	int clientAddrSize = sizeof(clientAddr);
-
-	// accept va sortir un client en attente depuis la file, écrire son adresse (et sa taille) dans les paramètres de sortie
-	// et retourner une socket TCP correspondant à ce client
-	// Note: par défaut cette fonction va mettre le programme en pause si la file d'attente est vide (on parle de fonction bloquante)
-	SOCKET client = accept(sock, reinterpret_cast<sockaddr*>(&clientAddr), &clientAddrSize);
-	if (client == INVALID_SOCKET)
+	std::vector<ClientData> clients;
+	// Boucle infinie pour que le serveur tourne indéfiniment
+	while (true)
 	{
-		std::cerr << "failed to put accept new client (" << WSAGetLastError() << ")\n";
+		// On construit une liste de descripteurs pour la fonctions WSAPoll, qui nous permet de surveiller plusieurs sockets simultanément
+		// Ces descripteurs référencent les sockets à surveiller ainsi que les événements à écouter (le plus souvent on surveillera l'entrée,
+		// à l'aide de POLLIN). Ceci va détecter les données reçues en entrée par nos sockets, mais aussi les événements de déconnexion.
+		// Dans le cas de la socket serveur, cela permet aussi de savoir lorsqu'un client est en attente d'acceptation (et donc que l'appel à accept ne va pas bloquer).
+
+		// Note: on pourrait ne pas reconstruire le tableau à chaque fois, si vous voulez le faire en exercice ;o
+		std::vector<WSAPOLLFD> pollFds;
+		// La méthode emplace_back construit un objet à l'intérieur du vector et nous renvoie une référence dessus
+		// alternativement nous pourrions également construire une variable de type WSAPOLLFD et l'ajouter au vector avec push_back 
+		WSAPOLLFD& serverFd = pollFds.emplace_back();
+		serverFd.fd = serverSock;
+		serverFd.events = POLLIN;
+		serverFd.revents = 0;
+
+		// On rajoute un descripteur pour chacun de nos clients actuels
+		for (ClientData client : clients)
+		{
+			WSAPOLLFD& clientFd = pollFds.emplace_back();
+			clientFd.fd = client.socket;
+			clientFd.events = POLLIN;
+			clientFd.revents = 0;
+		}
+
+		// On appelle la fonction WSAPoll (équivalent poll sous Linux) pour bloquer jusqu'à ce qu'un événement se produise
+		// au niveau d'une de nos sockets. Cette fonction attend un nombre défini de millisecondes (-1 pour une attente infinie) avant
+		// de retourner le nombre de sockets actives.
+
+		int r = WSAPoll(pollFds.data(), pollFds.size(), 100);
+		if (r > 0)
+		{
+			// WSAPoll modifie le champ revents des descripteurs passés en paramètre pour indiquer les événements déclenchés
+			for (const WSAPOLLFD& pollFd : pollFds)
+			{
+				// Ce descripteur n'a pas été déclenché, on passe au suivant
+				if (pollFd.revents == 0)
+					continue;
+
+				// Ce descripteur a été déclenché, et deux cas de figures sont possibles.
+				// Soit il s'agit du descripteur de la socket serveur (celle permettant la connexion de clients), signifiant qu'un nouveau client est en attente
+				// Soit une socket client est active, signifiant que nous avons reçu des données (ou potentiellement que le client s'est déconnecté)
+				if (pollFd.fd == serverSock)
+				{
+					// La socket
+					sockaddr_in clientAddr;
+					int clientAddrSize = sizeof(clientAddr);
+
+					SOCKET c = accept(serverSock, reinterpret_cast<sockaddr*>(&clientAddr), &clientAddrSize);
+					if (c == INVALID_SOCKET)
+					{
+						std::cerr << "failed to put accept new client (" << WSAGetLastError() << ")\n";
+						return EXIT_FAILURE;
+					}
+
+					ClientData client;
+					client.socket = c;
+					client.nickName = "";
+
+					// Représente une adresse IP (celle du client venant de se connecter) sous forme textuelle
+					char strAddr[INET_ADDRSTRLEN];
+					inet_ntop(clientAddr.sin_family, &clientAddr.sin_addr, strAddr, INET_ADDRSTRLEN);
+
+					std::cout << "new client connected from " << strAddr << ":" << ntohs(clientAddr.sin_port) << std::endl;
+
+					std::string message = "please input an username : \n";
+					if (send(client.socket, message.data(), message.size(), 0) == SOCKET_ERROR)
+						std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
+
+					clients.push_back(client);
+				}
+				else
+				{
+					// Client
+					char buffer[1024];
+					int len = recv(pollFd.fd, buffer, sizeof(buffer), 0);
+					if (len == 0 || len == SOCKET_ERROR)
+					{
+						// Disconnect
+						closesocket(pollFd.fd);
+
+						auto it = std::find_if(clients.begin(), clients.end(), [&pollFd](ClientData data){return data.socket == pollFd.fd;});
+
+						std::string username = it->nickName;
+
+						if (len == SOCKET_ERROR)
+							std::cerr << "recv failed (" << WSAGetLastError() << ")\n";
+						else
+							std::cout << username << " client disconnected" << std::endl;
+
+						clients.erase(it);
+
+						std::string messageDisconnect = username + " disconnected.";
+						for (ClientData client : clients)
+						{
+							if (send(client.socket, messageDisconnect.data(), messageDisconnect.size(), 0) == SOCKET_ERROR)
+							{
+								std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
+								// Pas de return ici pour éviter de casser le serveur sur l'envoi à un seul client,
+								// contentons-nous pour l'instant de logger l'erreur
+							}
+						}
+
+						continue;
+					}
+
+					std::cout << "received " << std::string_view(buffer, len) << std::endl;
+
+					// On renvoie le message à tous les autres clients connectés
+					for (ClientData client : clients)
+					{
+						bool newClient = false;
+						// On évite d'envoyer le message à la personne qui vient de l'envoyer
+						if (client.socket == pollFd.fd)
+						{
+							if (client.nickName == "")
+							{
+								client.nickName == std::string(buffer, len);
+								newClient = true;
+							}
+
+							continue;
+						}
+
+						if (newClient)
+						{
+							std::string newClientMessage = client.nickName + " just joined the chat.\n";
+							if (send(client.socket, newClientMessage.data(), newClientMessage.size(), 0) == SOCKET_ERROR)
+								std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
+						}
+						else
+						{
+							if (send(client.socket, buffer, len, 0) == SOCKET_ERROR)
+							{
+								std::cerr << "failed to send message to client (" << WSAGetLastError() << ")\n";
+								// Pas de return ici pour éviter de casser le serveur sur l'envoi à un seul client,
+								// contentons-nous pour l'instant de logger l'erreur
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	closesocket(serverSock);
+
+	return EXIT_SUCCESS;
+}
+
+int client()
+{
+	SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (sock == INVALID_SOCKET)
+	{
+		std::cerr << "failed to open socket (" << WSAGetLastError() << ")\n";
 		return EXIT_FAILURE;
 	}
 
-	// Représente une adresse IP (celle du client venant de se connecter) sous forme textuelle
-	char strAddr[INET_ADDRSTRLEN];
-	inet_ntop(clientAddr.sin_family, &clientAddr.sin_addr, strAddr, INET_ADDRSTRLEN);
+	sockaddr_in bindAddr;
+	bindAddr.sin_port = htons(1337); //< Conversion du nombre en big endian (endianness réseau)
+	bindAddr.sin_family = AF_INET;
 
-	std::cout << "new client connected from " << strAddr << std::endl;
-
-	// Lit des données depuis la socket vers un buffer mémoire, la fonction attend une capacité maximale à lire
-	// et renvoie le nombre d'octets lus
-	// Note: par défaut cette fonction bloque également le programme si aucune donnée n'est disponible
-	char buffer[1024];
-	int byteRead = recv(client, buffer, sizeof(buffer), 0);
-	if (byteRead == SOCKET_ERROR)
+	// Boucle demandant l'IP de connexion et se connectant jusqu'à y arriver
+	while (true)
 	{
-		std::cerr << "failed to read from client (" << WSAGetLastError() << ")\n";
-		return EXIT_FAILURE;
+		std::cout << "IP du serveur: " << std::flush;
+		std::string ip;
+		std::getline(std::cin, ip);
+		if (ip.empty())
+			ip = "127.0.0.1";
+
+		// Conversion d'une adresse IP textuelle vers une adresse IP binaire
+		if (inet_pton(AF_INET, ip.data(), &bindAddr.sin_addr.s_addr) != 1)
+		{
+			std::cerr << "invalid ip" << std::endl;
+			continue;
+		}
+
+		// La fonction connect va chercher à établir une connexion vers une application serveur (disposant d'une socket en mode écoute sur ce port).
+		// en mode bloquant, cette fonction ne retourne qu'une fois la connexion établie ou échouée.
+		if (connect(sock, reinterpret_cast<sockaddr*>(&bindAddr), sizeof(bindAddr)) == SOCKET_ERROR)
+		{
+			std::cerr << "failed to connect" << std::endl;
+			continue;
+		}
+
+		std::cout << "Connected" << std::endl;
+		break;
 	}
 
-	// Affichage des données reçues depuis le client (le string_view permet de limiter l'écriture du buffer à ce qui a été reçu)
-	std::cout << "Received " << byteRead << " from client: " << std::string_view(buffer, byteRead);
+	std::string message;
+	std::cout << "> " << std::flush;
 
-	// Contenu de la page HTML que nous affichons en retour
-	std::string_view body = "<html><body><center><h1>Bonjour l'IIM !</h1></center></body></html>";
-
-	// Réponse suivant le protocole HTTP afin que le navigateur accepte notre réponse
-	std::string response = "HTTP/1.1 200 OK\r\n";
-	response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-	response += "Content-Type: text/html\r\n";
-	response += "Connection: Closed\r\n";
-	response += "\r\n";
-	response += body;
-
-	// Envoi de la réponse au client
-	if (send(client, response.data(), response.size(), 0) == SOCKET_ERROR)
+	while (true)
 	{
-		std::cerr << "failed to send answer to client (" << WSAGetLastError() << ")\n";
-		return EXIT_FAILURE;
+		// Saisie de texte
+		// Pour que notre application console nous permette de saisir du texte sans bloquer
+		// il faut passer par des API systèmes comme conio, qui nous permet de récupérer l'état du clavier
+		// sans faire de la saisie classique.
+		if (_kbhit()) //< Est-ce qu'une touche est enfoncée ?
+		{
+			char c = _getch(); //< On récupère la touche enfoncée (sans l'afficher)
+			std::cout << c; // mais on l'affiche quand même (note: on aurait aussi pu utiliser _getche permet de faire les deux)
+			if (c == '\b') //< gestion du retour arrière
+			{
+				// Afficher un retour arrière déplace juste le curseur vers le caractère précédent
+				// pour l'effacer nous pouvons mettre un espace et redéplacer le curseur à nouveau vers l'arrière
+				std::cout << ' ' << '\b';
+
+				// On enlève le caractère de notre message en cours
+				if (!message.empty())
+					message.pop_back();
+			}
+			else if (c == '\r')
+			{
+				// \r correspond à l'appui sur la touche entrée, on envoie le message si celui-ci n'est pas vide
+				if (!message.empty())
+				{
+					if (send(sock, message.data(), message.size(), 0) == SOCKET_ERROR)
+					{
+						std::cout << "failed to send message to server: " << WSAGetLastError() << std::endl;
+						return EXIT_FAILURE;
+					}
+
+					// On affiche un retour à la ligne et le marqueur de saisie
+					std::cout << "\n> " << std::flush;
+
+					// On vide le message pour revenir à la suite
+					message.clear();
+				}
+			}
+			else
+				message.push_back(c); // on rajoute tout autre caractère dans notre saisie
+		}
+
+		// Vérifier si le serveur nous a envoyé un message, et l'afficher
+		// On peut utiliser la fonction WSAPoll pour vérifier si notre socket est prête à lire
+		WSAPOLLFD pollFd;
+		pollFd.fd = sock;
+		pollFd.events = POLLIN;
+		pollFd.revents = 0;
+
+		// On vérifie si notre socket est active
+		// Comme notre socket est la seule à être testée, on peut simplement vérifier le retour
+		// On met un timeout de 10ms pour éviter de pomper inutilement 100% du CPU ;o
+		if (WSAPoll(&pollFd, 1, 10) > 0)
+		{
+			char buffer[1024];
+			int len = recv(sock, buffer, sizeof(buffer), 0);
+			if (len == 0 || len == SOCKET_ERROR)
+			{
+				// recv renvoie 0 en cas de déconnexion propre, ou SOCKET_ERROR en cas d'erreur (typiquement time out)
+				if (len == 0)
+					std::cout << "disconnected from server" << std::endl;
+				else
+					std::cout << "disconnected with error: " << WSAGetLastError() << std::endl;
+
+				return EXIT_FAILURE;
+			}
+
+			std::string_view receivedMessage(buffer, len);
+
+			// Pour garder la saisie continue, on fait un retour à la ligne avant d'afficher le message
+			// puis à nouveau le marqueur de saisie et le message en cours
+			// ce n'est pas idéal mais c'est plus simple qu'effacer la ligne
+			std::cout << '\n' << receivedMessage << "\n> " << message << std::flush;
+		}
 	}
 
-	// closesocket ferme une socket, la rendant au système, ici nous fermons d'abord la socket client puis ensuite la socket serveur (les deux étant liées)
-	// Avec POSIX, l'équivalent est la fonction close
-	closesocket(client);
+	// Fermeture de la socket client
 	closesocket(sock);
 
-	// Fermeture de Winsock
-	WSACleanup();
+	return EXIT_SUCCESS;
 }
