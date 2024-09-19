@@ -1,57 +1,78 @@
-#include <vector>
-#include <iostream>
 #include <WinSock2.h>
-
-enum class Direction
-{
-	Nord		= 0, // 0000
-	NordEst		= 1, // 0001
-	Est			= 2, // 0010
-	SudEst		= 3, // 0011
-	Sud			= 4, // 0100
-	SudOuest	= 5, // 0101
-	Ouest		= 6, // 0110
-	NordOuest	= 7  // 0111
-};
-
-struct PlayerStruct
-{
-	bool movingLeft = 0;
-	bool movingRight = 0;
-	bool jumping = 0;
-	Direction dir = Direction::Nord;
-};
 
 int main()
 {
-	PlayerStruct inputs;
-	inputs.movingLeft = false;
-	inputs.movingRight = true;
-	inputs.jumping = true;
-	inputs.dir = Direction::Ouest;
+	// En TCP, un send ne correspond pas à un recv lorsqu'on échange des paquets sur internet car
+	// le protocole TCP va découper l'information en paquets automatiquement.
+	// On peut donc recv plusieurs fois pour un seul send, ou l'inverse en fonction de la taille de l'information.
 
-	uint8_t x = 
-		(inputs.movingLeft		<< 0)
-		| (inputs.movingRight	<< 1)
-		| (inputs.jumping		<< 2)
-		| (uint8_t)inputs.dir	<< 3;
+	// Anatomie d'un paquet de données :
+	// Taille (uint16) | OPCode (uint8/16) | Données...
 
-	std::vector<uint8_t> byteArray;
-	byteArray.resize(sizeof(uint8_t));
+	// Ne pas oublier de convertir vers le big endian quand on serialize des données de
+	// plusieurs octets (sauf données de type suite d'octets comme string).
+	// uint16_t myData = 10; <- c'est un uint16, attention à le convertir en big endian avant de l'envoyer.
 
-	std::memcpy(&byteArray[0], &x, sizeof(uint8_t));
-
-	uint8_t retX;
-	std::memcpy(&retX, &byteArray[0], sizeof(uint8_t));
-
-	std::cout << +retX << std::endl;
-
-	PlayerStruct retInputs;
-	retInputs.movingLeft	= retX & (1 << 0);
-	retInputs.movingRight	= retX & (1 << 1);
-	retInputs.jumping		= retX & (1 << 2);
-	retInputs.dir			= (Direction)((retX >> 3) & 7);
 }
+
+//=======================================================================================================
+//=======================================================================================================
+//=======================================================================================================
+
+//#include <vector>
+//#include <iostream>
+//#include <WinSock2.h>
+//
+//enum class Direction
+//{
+//	Nord		= 0, // 0000
+//	NordEst		= 1, // 0001
+//	Est			= 2, // 0010
+//	SudEst		= 3, // 0011
+//	Sud			= 4, // 0100
+//	SudOuest	= 5, // 0101
+//	Ouest		= 6, // 0110
+//	NordOuest	= 7  // 0111
+//};
+//
+//struct PlayerStruct
+//{
+//	bool movingLeft = 0;
+//	bool movingRight = 0;
+//	bool jumping = 0;
+//	Direction dir = Direction::Nord;
+//};
+//
+//int main()
+//{
+//	PlayerStruct inputs;
+//	inputs.movingLeft = false;
+//	inputs.movingRight = true;
+//	inputs.jumping = true;
+//	inputs.dir = Direction::Ouest;
+//
+//	uint8_t x = 
+//		(inputs.movingLeft		<< 0)
+//		| (inputs.movingRight	<< 1)
+//		| (inputs.jumping		<< 2)
+//		| (uint8_t)inputs.dir	<< 3;
+//
+//	std::vector<uint8_t> byteArray;
+//	byteArray.resize(sizeof(uint8_t));
+//
+//	std::memcpy(&byteArray[0], &x, sizeof(uint8_t));
+//
+//	uint8_t retX;
+//	std::memcpy(&retX, &byteArray[0], sizeof(uint8_t));
+//
+//	std::cout << +retX << std::endl;
+//
+//	PlayerStruct retInputs;
+//	retInputs.movingLeft	= retX & (1 << 0);
+//	retInputs.movingRight	= retX & (1 << 1);
+//	retInputs.jumping		= retX & (1 << 2);
+//	retInputs.dir			= (Direction)((retX >> 3) & 7);
+//}
 
 //=======================================================================================================
 //=======================================================================================================
